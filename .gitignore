@@ -1,0 +1,4 @@
+node_modules/
+dist/
+ai-pet-data/
+*.tgz
