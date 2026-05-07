@@ -1,5 +1,6 @@
 /**
  * Main App component - ties together all UI elements and game logic.
+ * Supports multiple pets with tab switching.
  */
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
@@ -9,78 +10,305 @@ import StatusBar from './components/StatusBar.js';
 import ChatPanel from './components/ChatPanel.js';
 import InputBar from './components/InputBar.js';
 import EvolutionAnimation from './components/EvolutionAnimation.js';
-import type { PetState } from './pet/petState.js';
-import { feedPet, playWithPet, chatInteraction, tickState, makeWish, resolveSpecies } from './pet/petState.js';
+import PetTabs from './components/PetTabs.js';
+import type { PetState, PetId } from './pet/petState.js';
+import { createInitialState, feedPet, playWithPet, chatInteraction, tickState, makeWish, resolveSpecies, generatePetId } from './pet/petState.js';
 import { checkEvolution, getStageInfo } from './pet/evolution.js';
 import type { AIProvider, ChatMessage } from './ai/provider.js';
 import { buildChatMessages, extractSentiment, cleanResponse } from './ai/systemPrompt.js';
 import { parseSpriteFromAI, stripSpriteFromResponse } from './utils/pixel.js';
-import { saveState } from './config/config.js';
+import { savePetState, savePetHistory, deletePetData } from './config/config.js';
+import type { PetRegistry } from './config/registry.js';
+import { saveRegistry } from './config/config.js';
+import { CacheManager } from './cache/cacheManager.js';
+import { buildCacheKey, detectInputType } from './cache/cacheKey.js';
 
 interface AppProps {
-  initialState: PetState;
+  initialPets: Record<string, PetState>;
+  initialHistories: Record<string, ChatMessage[]>;
+  initialActivePetId: string;
+  initialRegistry: PetRegistry;
   provider: AIProvider;
 }
 
-const App: React.FC<AppProps> = ({ initialState, provider }) => {
+const App: React.FC<AppProps> = ({ initialPets, initialHistories, initialActivePetId, initialRegistry, provider }) => {
   const { exit } = useApp();
-  const [petState, setPetState] = useState<PetState>(initialState);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [pets, setPets] = useState<Record<string, PetState>>(initialPets);
+  const [histories, setHistories] = useState<Record<string, ChatMessage[]>>(initialHistories);
+  const [activePetId, setActivePetId] = useState<string>(initialActivePetId);
+  const [registry, setRegistry] = useState<PetRegistry>(initialRegistry);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
   const [infoText, setInfoText] = useState<string | null>(null);
-  const [evolution, setEvolution] = useState<{ oldStage: number; newStage: number } | null>(null);
+  const [evolutions, setEvolutions] = useState<Record<string, { oldStage: number; newStage: number } | null>>({});
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
-  // Save state on every change
-  const prevStageRef = useRef(initialState.stage);
+  // Derived: active pet state and messages
+  const activePet = pets[activePetId] ?? null;
+  const activeMessages = histories[activePetId] ?? [];
+  const activeEvolution = evolutions[activePetId] ?? null;
 
-  useEffect(() => {
-    saveState(petState);
-  }, [petState]);
+  // Track which pet needs saving (avoid saving all pets on every render)
+  const dirtyPetsRef = useRef<Set<string>>(new Set());
+  const dirtyHistoriesRef = useRef<Set<string>>(new Set());
 
-  // Periodic tick: hunger increases, mood decreases over time
+  // Cache manager for LLM response caching
+  const cacheRef = useRef<CacheManager | null>(null);
+  if (!cacheRef.current) {
+    cacheRef.current = new CacheManager();
+    cacheRef.current.load();
+  }
+  const cache = cacheRef.current;
+
+  // Save dirty pets periodically
   useEffect(() => {
     const interval = setInterval(() => {
-      setPetState(prev => tickState(prev));
-    }, 30000); // every 30 seconds
+      // Swap sets to avoid race condition with concurrent modifications
+      const dirtyPets = dirtyPetsRef.current;
+      dirtyPetsRef.current = new Set();
+      for (const petId of dirtyPets) {
+        if (pets[petId]) savePetState(petId, pets[petId]);
+      }
+
+      const dirtyHistories = dirtyHistoriesRef.current;
+      dirtyHistoriesRef.current = new Set();
+      for (const petId of dirtyHistories) {
+        if (histories[petId]) savePetHistory(petId, histories[petId]);
+      }
+
+      // Periodic cache save
+      cache.save();
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [pets, histories]);
+
+  // Mark active pet dirty on state change
+  useEffect(() => {
+    if (activePetId && pets[activePetId]) {
+      dirtyPetsRef.current.add(activePetId);
+    }
+  }, [pets, activePetId]);
+
+  // Mark active pet history dirty on change
+  useEffect(() => {
+    if (activePetId && histories[activePetId]) {
+      dirtyHistoriesRef.current.add(activePetId);
+    }
+  }, [histories, activePetId]);
+
+  // Periodic tick: affects ALL pets
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setPets(prev => {
+        const next = { ...prev };
+        for (const petId of Object.keys(next)) {
+          next[petId] = tickState(next[petId]);
+          dirtyPetsRef.current.add(petId);
+        }
+        return next;
+      });
+    }, 30000);
     return () => clearInterval(interval);
   }, []);
 
+  // Pending delete timeout
+  useEffect(() => {
+    if (pendingDelete) {
+      const timer = setTimeout(() => {
+        setPendingDelete(null);
+        setInfoText(null);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [pendingDelete]);
+
+  // Tab switching handler
+  const handleTabSwitch = useCallback(() => {
+    const petIds = registry.pets.map(p => p.id);
+    if (petIds.length <= 1) return;
+    const currentIndex = petIds.indexOf(activePetId);
+    const nextIndex = (currentIndex + 1) % petIds.length;
+    const nextPetId = petIds[nextIndex];
+    setActivePetId(nextPetId);
+    // Update registry activePetId
+    const updatedRegistry = { ...registry, activePetId: nextPetId };
+    setRegistry(updatedRegistry);
+    saveRegistry(updatedRegistry);
+  }, [registry, activePetId]);
+
   const handleInput = useCallback(async (input: string) => {
+    if (!activePet) return;
+    // Guard against concurrent AI calls using ref (avoids stale closure)
+    if (busyRef.current) return;
+
+    // Check for pending delete confirmation
+    if (pendingDelete) {
+      if (input.toLowerCase() === '/yes') {
+        const petIdToDelete = pendingDelete;
+        setPendingDelete(null);
+
+        // Don't allow deleting the last pet
+        if (registry.pets.length <= 1) {
+          setInfoText('Cannot delete the last pet! Use /addpet to add another first.');
+          setTimeout(() => setInfoText(null), 3000);
+          return;
+        }
+
+        // Remove pet
+        setPets(prev => {
+          const next = { ...prev };
+          delete next[petIdToDelete];
+          return next;
+        });
+        setHistories(prev => {
+          const next = { ...prev };
+          delete next[petIdToDelete];
+          return next;
+        });
+        setEvolutions(prev => {
+          const next = { ...prev };
+          delete next[petIdToDelete];
+          return next;
+        });
+
+        // Update registry using functional updater to avoid stale closure
+        setRegistry(prevReg => {
+          const newPets = prevReg.pets.filter(p => p.id !== petIdToDelete);
+          const newActiveId = petIdToDelete === activePetId ? newPets[0].id : activePetId;
+          const updatedRegistry = { ...prevReg, pets: newPets, activePetId: newActiveId };
+          saveRegistry(updatedRegistry);
+          setActivePetId(newActiveId);
+          return updatedRegistry;
+        });
+
+        // Delete files
+        deletePetData(petIdToDelete);
+
+        setInfoText(`Pet deleted.`);
+        setTimeout(() => setInfoText(null), 3000);
+      } else {
+        setPendingDelete(null);
+        setInfoText('Delete cancelled.');
+        setTimeout(() => setInfoText(null), 2000);
+      }
+      return;
+    }
+
     // Command handling
     if (input.startsWith('/')) {
       const cmd = input.toLowerCase().trim();
 
+      // /addpet <name> - add a new pet
+      if (cmd.startsWith('/addpet')) {
+        const name = input.slice(7).trim();
+        if (!name) {
+          setInfoText('Usage: /addpet <name>');
+          setTimeout(() => setInfoText(null), 3000);
+          return;
+        }
+        const petId = generatePetId(name);
+        const newState = createInitialState(name);
+        setPets(prev => ({ ...prev, [petId]: newState }));
+        setHistories(prev => ({ ...prev, [petId]: [] }));
+        savePetState(petId, newState);
+
+        const newPetEntry: PetId = { id: petId, name };
+        const updatedRegistry = { ...registry, pets: [...registry.pets, newPetEntry] };
+        setRegistry(updatedRegistry);
+        saveRegistry(updatedRegistry);
+
+        setInfoText(`Added pet "${name}"! Press Tab to switch to it.`);
+        setTimeout(() => setInfoText(null), 3000);
+        return;
+      }
+
+      // /delpet - delete the active pet (with confirmation)
+      if (cmd === '/delpet') {
+        setPendingDelete(activePetId);
+        setInfoText(`Delete "${activePet.name}"? Type /yes to confirm.`);
+        setTimeout(() => setInfoText(null), 5000);
+        return;
+      }
+
+      // /switchpet <name> - switch to pet by name
+      if (cmd.startsWith('/switchpet')) {
+        const searchName = input.slice(10).trim().toLowerCase();
+        if (!searchName) {
+          setInfoText('Usage: /switchpet <name>');
+          setTimeout(() => setInfoText(null), 3000);
+          return;
+        }
+        const found = registry.pets.find(p => p.name.toLowerCase().includes(searchName));
+        if (found) {
+          setActivePetId(found.id);
+          const updatedRegistry = { ...registry, activePetId: found.id };
+          setRegistry(updatedRegistry);
+          saveRegistry(updatedRegistry);
+        } else {
+          setInfoText(`Pet "${searchName}" not found.`);
+          setTimeout(() => setInfoText(null), 3000);
+        }
+        return;
+      }
+
       // /feed [food] - feed the pet, optionally with a specific food
       if (cmd.startsWith('/feed')) {
         const food = input.slice(5).trim() || undefined;
-        setPetState(prev => feedPet(prev, food));
+        setPets(prev => ({ ...prev, [activePetId]: feedPet(prev[activePetId], food) }));
+        dirtyPetsRef.current.add(activePetId);
 
         if (food) {
-          // Send food to AI for review - treat as chat
-          setBusy(true);
+          setBusy(true); busyRef.current = true;
           try {
-            const chatMessages = buildChatMessages(petState, messages, `[FEED] The user fed you: ${food}`);
-            const rawResponse = await provider.chat(chatMessages);
+            const aiInput = `[FEED] The user fed you: ${food}`;
+            const cacheKey = buildCacheKey('feed', food, activePet.stage, activePet.species);
+            const cached = cache.get(cacheKey);
+            let rawResponse: string;
+
+            if (cached) {
+              rawResponse = cached.rawResponse;
+            } else {
+              const chatMessages = buildChatMessages(activePet, activeMessages, aiInput);
+              rawResponse = await provider.chat(chatMessages);
+              cache.set(cacheKey, rawResponse);
+            }
+
             const sentiment = extractSentiment(rawResponse);
             const dynamicSpriteFrames = parseSpriteFromAI(rawResponse);
             const cleaned = cleanResponse(stripSpriteFromResponse(rawResponse));
 
-            setMessages(prev => [
+            setHistories(prev => ({
               ...prev,
-              { role: 'user' as const, content: `/feed ${food}` },
-              { role: 'assistant' as const, content: cleaned },
-            ]);
+              [activePetId]: [
+                ...(prev[activePetId] ?? []),
+                { role: 'user' as const, content: `/feed ${food}` },
+                { role: 'assistant' as const, content: cleaned },
+              ],
+            }));
+            dirtyHistoriesRef.current.add(activePetId);
 
-            setPetState(prev => {
-              const updated = chatInteraction(prev, sentiment);
-              return { ...updated, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : prev.dynamicSprite };
+            setPets(prev => {
+              const pet = prev[activePetId];
+              if (!pet) return prev;
+              const updated = chatInteraction(pet, sentiment);
+              dirtyPetsRef.current.add(activePetId);
+
+              // Check for evolution
+              const newStage = checkEvolution(updated);
+              if (newStage !== null) {
+                cache.invalidateStage(updated.stage);
+                setEvolutions(prevE => ({ ...prevE, [activePetId]: { oldStage: updated.stage, newStage } }));
+                const species = updated.stage === 1 ? resolveSpecies(updated.wish) : updated.species;
+                return { ...prev, [activePetId]: { ...updated, stage: newStage, species, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : pet.dynamicSprite } };
+              }
+              return { ...prev, [activePetId]: { ...updated, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : pet.dynamicSprite } };
             });
           } catch (err: unknown) {
             const errorMsg = err instanceof Error ? err.message : 'Unknown error';
             setInfoText(`AI Error: ${errorMsg}`);
             setTimeout(() => setInfoText(null), 3000);
           } finally {
-            setBusy(false);
+            setBusy(false); busyRef.current = false;
           }
         } else {
           setInfoText('You fed your pet! Hunger decreased. Tip: /feed <food> to feed something specific!');
@@ -92,34 +320,60 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
       // /play [activity] - play with the pet, optionally with a specific activity
       if (cmd.startsWith('/play')) {
         const activity = input.slice(5).trim() || undefined;
-        setPetState(prev => playWithPet(prev, activity));
+        setPets(prev => ({ ...prev, [activePetId]: playWithPet(prev[activePetId], activity) }));
+        dirtyPetsRef.current.add(activePetId);
 
         if (activity) {
-          // Send activity to AI for review - treat as chat
-          setBusy(true);
+          setBusy(true); busyRef.current = true;
           try {
-            const chatMessages = buildChatMessages(petState, messages, `[PLAY] The user wants to play with you: ${activity}`);
-            const rawResponse = await provider.chat(chatMessages);
+            const aiInput = `[PLAY] The user wants to play with you: ${activity}`;
+            const cacheKey = buildCacheKey('play', activity, activePet.stage, activePet.species);
+            const cached = cache.get(cacheKey);
+            let rawResponse: string;
+
+            if (cached) {
+              rawResponse = cached.rawResponse;
+            } else {
+              const chatMessages = buildChatMessages(activePet, activeMessages, aiInput);
+              rawResponse = await provider.chat(chatMessages);
+              cache.set(cacheKey, rawResponse);
+            }
+
             const sentiment = extractSentiment(rawResponse);
             const dynamicSpriteFrames = parseSpriteFromAI(rawResponse);
             const cleaned = cleanResponse(stripSpriteFromResponse(rawResponse));
 
-            setMessages(prev => [
+            setHistories(prev => ({
               ...prev,
-              { role: 'user' as const, content: `/play ${activity}` },
-              { role: 'assistant' as const, content: cleaned },
-            ]);
+              [activePetId]: [
+                ...(prev[activePetId] ?? []),
+                { role: 'user' as const, content: `/play ${activity}` },
+                { role: 'assistant' as const, content: cleaned },
+              ],
+            }));
+            dirtyHistoriesRef.current.add(activePetId);
 
-            setPetState(prev => {
-              const updated = chatInteraction(prev, sentiment);
-              return { ...updated, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : prev.dynamicSprite };
+            setPets(prev => {
+              const pet = prev[activePetId];
+              if (!pet) return prev;
+              const updated = chatInteraction(pet, sentiment);
+              dirtyPetsRef.current.add(activePetId);
+
+              const newStage = checkEvolution(updated);
+              if (newStage !== null) {
+                cache.invalidateStage(updated.stage);
+                setEvolutions(prevE => ({ ...prevE, [activePetId]: { oldStage: updated.stage, newStage } }));
+                const species = updated.stage === 1 ? resolveSpecies(updated.wish) : updated.species;
+                return { ...prev, [activePetId]: { ...updated, stage: newStage, species, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : pet.dynamicSprite } };
+              }
+              return { ...prev, [activePetId]: { ...updated, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : pet.dynamicSprite } };
             });
           } catch (err: unknown) {
             const errorMsg = err instanceof Error ? err.message : 'Unknown error';
             setInfoText(`AI Error: ${errorMsg}`);
             setTimeout(() => setInfoText(null), 3000);
           } finally {
-            setBusy(false);
+            setBusy(false); busyRef.current = false;
           }
         } else {
           setInfoText('You played with your pet! Mood increased! Tip: /play <activity> to play something specific!');
@@ -131,7 +385,7 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
       // /wish <something> - make a wish during egg stage
       if (cmd.startsWith('/wish')) {
         const wishText = input.slice(5).trim();
-        if (petState.stage !== 1) {
+        if (activePet.stage !== 1) {
           setInfoText('You can only make a wish while your pet is an egg!');
           setTimeout(() => setInfoText(null), 3000);
           return;
@@ -141,7 +395,8 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
           setTimeout(() => setInfoText(null), 4000);
           return;
         }
-        setPetState(prev => makeWish(prev, wishText));
+        setPets(prev => ({ ...prev, [activePetId]: makeWish(prev[activePetId], wishText) }));
+        dirtyPetsRef.current.add(activePetId);
         setInfoText(`You wished for a ${wishText}... The egg glows softly.`);
         setTimeout(() => setInfoText(null), 3000);
         return;
@@ -151,32 +406,49 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
       if (cmd.startsWith('/soul')) {
         const soulText = input.slice(5).trim();
         if (!soulText) {
-          const currentSoul = petState.soul || 'none';
+          const currentSoul = activePet.soul || 'none';
           setInfoText(`Current soul: ${currentSoul}. Usage: /soul <personality>  e.g. /soul 傲娇, /soul lazy and greedy, /soul 勇敢善良`);
           setTimeout(() => setInfoText(null), 4000);
           return;
         }
-        setPetState(prev => ({ ...prev, soul: soulText }));
+        setPets(prev => ({ ...prev, [activePetId]: { ...prev[activePetId], soul: soulText } }));
+        dirtyPetsRef.current.add(activePetId);
         setInfoText(`Soul set: ${soulText}. Your pet's personality has been shaped!`);
         setTimeout(() => setInfoText(null), 3000);
         return;
       }
 
+      if (cmd === '/cache') {
+        const stats = cache.getStats();
+        const oldestMin = Math.round(stats.oldestAgeMs / 60000);
+        setInfoText(`Cache: ${stats.totalEntries} entries | ${stats.totalHits} hits | oldest: ${oldestMin}m ago`);
+        setTimeout(() => setInfoText(null), 4000);
+        return;
+      }
+
       if (cmd === '/status') {
-        const stageInfo = getStageInfo(petState.stage);
-        setInfoText(`${petState.name} | Stage: ${stageInfo.name} | Mood: ${Math.round(petState.mood)} | Hunger: ${Math.round(petState.hunger)} | EXP: ${petState.experience}`);
+        const stageInfo = getStageInfo(activePet.stage);
+        setInfoText(`${activePet.name} | Stage: ${stageInfo.name} | Mood: ${Math.round(activePet.mood)} | Hunger: ${Math.round(activePet.hunger)} | EXP: ${activePet.experience}`);
         setTimeout(() => setInfoText(null), 4000);
         return;
       }
 
       if (cmd === '/help') {
-        const eggCmds = petState.stage === 1 ? ' /wish <animal>' : '';
-        setInfoText(`Commands: /feed [food] /play [activity] /soul <trait> /status /help /quit${eggCmds}`);
+        const eggCmds = activePet.stage === 1 ? ' /wish <animal>' : '';
+        setInfoText(`Commands: /feed [food] /play [activity] /soul <trait> /addpet <name> /delpet /switchpet <name> /cache /status /help /quit${eggCmds}`);
         setTimeout(() => setInfoText(null), 4000);
         return;
       }
 
       if (cmd === '/quit' || cmd === '/exit') {
+        // Save all dirty data before exit
+        for (const petId of dirtyPetsRef.current) {
+          if (pets[petId]) savePetState(petId, pets[petId]);
+        }
+        for (const petId of dirtyHistoriesRef.current) {
+          if (histories[petId]) savePetHistory(petId, histories[petId]);
+        }
+        cache.save();
         exit();
         return;
       }
@@ -187,10 +459,20 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
     }
 
     // AI Chat
-    setBusy(true);
+    setBusy(true); busyRef.current = true;
     try {
-      const chatMessages = buildChatMessages(petState, messages, input);
-      const rawResponse = await provider.chat(chatMessages);
+      const cacheKey = buildCacheKey('chat', input, activePet.stage, activePet.species);
+      const cached = cache.get(cacheKey);
+      let rawResponse: string;
+
+      if (cached) {
+        rawResponse = cached.rawResponse;
+      } else {
+        const chatMessages = buildChatMessages(activePet, activeMessages, input);
+        rawResponse = await provider.chat(chatMessages);
+        cache.set(cacheKey, rawResponse);
+      }
+
       const sentiment = extractSentiment(rawResponse);
 
       // Parse dynamic sprite from AI response
@@ -198,39 +480,47 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
       // Clean both sentiment tags AND sprite blocks for display
       const cleaned = cleanResponse(stripSpriteFromResponse(rawResponse));
 
-      setMessages(prev => [
+      setHistories(prev => ({
         ...prev,
-        { role: 'user' as const, content: input },
-        { role: 'assistant' as const, content: cleaned },
-      ]);
+        [activePetId]: [
+          ...(prev[activePetId] ?? []),
+          { role: 'user' as const, content: input },
+          { role: 'assistant' as const, content: cleaned },
+        ],
+      }));
+      dirtyHistoriesRef.current.add(activePetId);
 
       // Update pet state based on chat
-      setPetState(prev => {
-        const updated = chatInteraction(prev, sentiment);
+      setPets(prev => {
+        const pet = prev[activePetId];
+        if (!pet) return prev;
+        const updated = chatInteraction(pet, sentiment);
+        dirtyPetsRef.current.add(activePetId);
 
         // Check for evolution
         const newStage = checkEvolution(updated);
         if (newStage !== null) {
-          setEvolution({ oldStage: updated.stage, newStage });
+          cache.invalidateStage(updated.stage);
+          setEvolutions(prevE => ({ ...prevE, [activePetId]: { oldStage: updated.stage, newStage } }));
           // When hatching from egg, resolve species from wish
           const species = updated.stage === 1 ? resolveSpecies(updated.wish) : updated.species;
-          return { ...updated, stage: newStage, species, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : prev.dynamicSprite };
+          return { ...prev, [activePetId]: { ...updated, stage: newStage, species, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : pet.dynamicSprite } };
         }
         // If AI sent a new sprite, update it; otherwise keep the previous one
-        return { ...updated, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : prev.dynamicSprite };
+        return { ...prev, [activePetId]: { ...updated, dynamicSprite: dynamicSpriteFrames.length > 0 ? rawResponse : pet.dynamicSprite } };
       });
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : 'Unknown error';
       setInfoText(`AI Error: ${errorMsg}`);
       setTimeout(() => setInfoText(null), 3000);
     } finally {
-      setBusy(false);
+      setBusy(false); busyRef.current = false;
     }
-  }, [petState, messages, provider, exit]);
+  }, [pets, histories, activePetId, activePet, activeMessages, provider, exit, registry, pendingDelete]);
 
   const handleEvolutionComplete = useCallback(() => {
-    setEvolution(null);
-  }, []);
+    setEvolutions(prev => ({ ...prev, [activePetId]: null }));
+  }, [activePetId]);
 
   return (
     <Box flexDirection="column">
@@ -241,28 +531,31 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
         <Text dimColor>/help for commands</Text>
       </Box>
 
-      {/* Pet sprite (75%) + status bars (25%) side by side */}
+      {/* Pet tabs */}
+      <PetTabs pets={registry.pets} activePetId={activePetId} />
+
+      {/* Pet sprite + status bars side by side */}
       <Box flexDirection="row" borderStyle="single" borderColor="gray" paddingX={1}>
         <Box width="75%" justifyContent="center" alignItems="center">
-          <PetSprite state={petState} />
+          {activePet && <PetSprite state={activePet} />}
         </Box>
         <Box position="absolute" right={1} top={1}>
-          <StatusBar state={petState} />
+          {activePet && <StatusBar state={activePet} />}
         </Box>
       </Box>
 
       {/* Evolution animation overlay */}
-      {evolution && (
+      {activeEvolution && activePet && (
         <EvolutionAnimation
-          oldStage={evolution.oldStage}
-          newStage={evolution.newStage}
-          petName={petState.name}
+          oldStage={activeEvolution.oldStage}
+          newStage={activeEvolution.newStage}
+          petName={activePet.name}
           onComplete={handleEvolutionComplete}
         />
       )}
 
       {/* Chat panel */}
-      <ChatPanel messages={messages} />
+      <ChatPanel messages={activeMessages} />
 
       {/* Info text (command feedback) */}
       {infoText && (
@@ -272,7 +565,7 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
       )}
 
       {/* Input */}
-      <InputBar onSubmit={handleInput} disabled={busy} />
+      <InputBar onSubmit={handleInput} onTab={handleTabSwitch} disabled={busy} />
     </Box>
   );
 };
@@ -280,10 +573,22 @@ const App: React.FC<AppProps> = ({ initialState, provider }) => {
 /**
  * Boot the application.
  */
-export function startApp(initialState: PetState, provider: AIProvider): Promise<void> {
+export function startApp(
+  initialPets: Record<string, PetState>,
+  initialHistories: Record<string, ChatMessage[]>,
+  initialActivePetId: string,
+  initialRegistry: PetRegistry,
+  provider: AIProvider,
+): Promise<void> {
   return new Promise((resolve) => {
     const { waitUntilExit } = render(
-      <App initialState={initialState} provider={provider} />,
+      <App
+        initialPets={initialPets}
+        initialHistories={initialHistories}
+        initialActivePetId={initialActivePetId}
+        initialRegistry={initialRegistry}
+        provider={provider}
+      />,
       { exitOnCtrlC: true }
     );
     waitUntilExit().then(() => resolve()).catch(() => resolve());

@@ -2,15 +2,23 @@
  * AI Terminal Pet - Entry point
  *
  * Boots the terminal pet application with config and AI provider.
+ * Supports multi-pet with automatic migration from legacy single-pet state.
  */
 
+import fs from 'fs';
+import path from 'path';
 import { Command } from 'commander';
-import { loadConfig, saveConfig, loadState, isConfigured, type AppConfig } from './config/config.js';
+import { loadConfig, saveConfig, loadState, isConfigured, loadRegistry, saveRegistry, loadPetState, savePetState, loadPetHistory, ensurePetsDir, type AppConfig } from './config/config.js';
 import { AnthropicProvider } from './ai/anthropic.js';
 import { OpenAIProvider } from './ai/openai.js';
-import type { AIProvider } from './ai/provider.js';
+import type { AIProvider, ChatMessage } from './ai/provider.js';
 import { startApp } from './app.js';
-import { createInitialState } from './pet/petState.js';
+import { createInitialState, generatePetId, type PetId } from './pet/petState.js';
+import type { PetState } from './pet/petState.js';
+import type { PetRegistry } from './config/registry.js';
+import { getDefaultRegistry } from './config/registry.js';
+
+const DATA_DIR = 'ai-pet-data';
 
 const program = new Command();
 
@@ -70,14 +78,83 @@ async function main(opts: Record<string, string | undefined>) {
   // Save config if it was modified
   saveConfig(config);
 
-  // Load or create pet state
-  const state = loadState(config);
+  // Load registry and all pet states
+  let registry = loadRegistry();
+  const initialPets: Record<string, PetState> = {};
+  const initialHistories: Record<string, ChatMessage[]> = {};
+
+  if (registry.pets.length === 0) {
+    // Check for legacy single-pet state.json to migrate
+    const petsDir = path.resolve(process.cwd(), DATA_DIR, 'pets');
+    const legacyStatePath = path.resolve(process.cwd(), DATA_DIR, 'state.json');
+
+    if (!fs.existsSync(petsDir) && fs.existsSync(legacyStatePath)) {
+      // Migrate legacy state to multi-pet format
+      const legacyState = loadState(config);
+      const petId = generatePetId(legacyState.name);
+      initialPets[petId] = legacyState;
+      initialHistories[petId] = [];
+      const petEntry: PetId = { id: petId, name: legacyState.name };
+      registry = { pets: [petEntry], activePetId: petId, version: 1 };
+      ensurePetsDir();
+      savePetState(petId, legacyState);
+      saveRegistry(registry);
+      // Don't delete legacy state.json - safe migration
+    } else {
+      // Fresh start: create default pet
+      const petId = generatePetId(config.petName);
+      const state = createInitialState(config.petName);
+      initialPets[petId] = state;
+      initialHistories[petId] = [];
+      const petEntry: PetId = { id: petId, name: config.petName };
+      registry = { pets: [petEntry], activePetId: petId, version: 1 };
+      ensurePetsDir();
+      savePetState(petId, state);
+      saveRegistry(registry);
+    }
+  } else {
+    // Load existing multi-pet data
+    const validPetIds: string[] = [];
+    for (const petIdObj of registry.pets) {
+      const state = loadPetState(petIdObj.id);
+      if (state) {
+        initialPets[petIdObj.id] = state;
+        initialHistories[petIdObj.id] = loadPetHistory(petIdObj.id);
+        validPetIds.push(petIdObj.id);
+      }
+    }
+
+    // Remove corrupted pets from registry
+    if (validPetIds.length < registry.pets.length) {
+      registry.pets = registry.pets.filter(p => validPetIds.includes(p.id));
+      saveRegistry(registry);
+    }
+
+    // Validate activePetId still exists
+    if (!initialPets[registry.activePetId] && registry.pets.length > 0) {
+      registry.activePetId = registry.pets[0].id;
+      saveRegistry(registry);
+    }
+  }
+
+  // If no valid pets exist, create a default one
+  if (Object.keys(initialPets).length === 0) {
+    const petId = generatePetId(config.petName);
+    const state = createInitialState(config.petName);
+    initialPets[petId] = state;
+    initialHistories[petId] = [];
+    const petEntry: PetId = { id: petId, name: config.petName };
+    registry = { pets: [petEntry], activePetId: petId, version: 1 };
+    ensurePetsDir();
+    savePetState(petId, state);
+    saveRegistry(registry);
+  }
 
   // Create AI provider
   const provider = createProvider(config);
 
   // Start the app
-  await startApp(state, provider);
+  await startApp(initialPets, initialHistories, registry.activePetId, registry, provider);
 }
 
 program.parse();

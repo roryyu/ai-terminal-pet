@@ -1,5 +1,6 @@
 /**
  * InputBar component - user text input for chatting with the pet.
+ * Supports Tab key to switch pets when input is empty.
  */
 
 import React, { useState } from 'react';
@@ -7,14 +8,22 @@ import { Box, Text, useInput } from 'ink';
 
 interface InputBarProps {
   onSubmit: (value: string) => void;
+  onTab: () => void;
   disabled: boolean;
 }
 
-const InputBar: React.FC<InputBarProps> = ({ onSubmit, disabled }) => {
+const InputBar: React.FC<InputBarProps> = ({ onSubmit, onTab, disabled }) => {
   const [input, setInput] = useState('');
 
   useInput((ch, key) => {
     if (disabled) return;
+
+    if (key.tab) {
+      if (input.length === 0) {
+        onTab();
+      }
+      return;
+    }
 
     if (key.return) {
       const trimmed = input.trim();

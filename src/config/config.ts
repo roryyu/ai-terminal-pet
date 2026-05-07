@@ -9,10 +9,15 @@ import path from 'path';
 import type { PetState } from '../pet/petState.js';
 import { createInitialState } from '../pet/petState.js';
 import { getStageForExp } from '../pet/evolution.js';
+import type { PetRegistry } from './registry.js';
+import { getDefaultRegistry } from './registry.js';
+import type { ChatMessage } from '../ai/provider.js';
 
 const DATA_DIR = 'ai-pet-data';
 const CONFIG_FILE = 'config.json';
 const STATE_FILE = 'state.json';
+const PETS_DIR = 'pets';
+const REGISTRY_FILE = 'registry.json';
 
 export interface AppConfig {
   provider: 'anthropic' | 'openai';
@@ -92,4 +97,86 @@ export function saveState(state: PetState): void {
 /** Check if config has been set up (has API key) */
 export function isConfigured(config: AppConfig): boolean {
   return config.apiKey.length > 0;
+}
+
+/** Ensure pets directory exists and return its path */
+export function ensurePetsDir(): string {
+  const dir = path.join(ensureDataDir(), PETS_DIR);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  return dir;
+}
+
+/** Load pet registry from file */
+export function loadRegistry(): PetRegistry {
+  const dir = ensurePetsDir();
+  const registryPath = path.join(dir, REGISTRY_FILE);
+  if (!fs.existsSync(registryPath)) {
+    return getDefaultRegistry();
+  }
+  try {
+    const raw = fs.readFileSync(registryPath, 'utf-8');
+    return { ...getDefaultRegistry(), ...JSON.parse(raw) };
+  } catch {
+    return getDefaultRegistry();
+  }
+}
+
+/** Save pet registry to file */
+export function saveRegistry(registry: PetRegistry): void {
+  const dir = ensurePetsDir();
+  const registryPath = path.join(dir, REGISTRY_FILE);
+  fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2), 'utf-8');
+}
+
+/** Load a specific pet's state */
+export function loadPetState(petId: string): PetState | null {
+  const dir = ensurePetsDir();
+  const statePath = path.join(dir, `${petId}.json`);
+  if (!fs.existsSync(statePath)) return null;
+  try {
+    const raw = fs.readFileSync(statePath, 'utf-8');
+    const saved = JSON.parse(raw) as PetState;
+    saved.stage = getStageForExp(saved.experience);
+    return saved;
+  } catch {
+    return null;
+  }
+}
+
+/** Save a specific pet's state */
+export function savePetState(petId: string, state: PetState): void {
+  const dir = ensurePetsDir();
+  const statePath = path.join(dir, `${petId}.json`);
+  fs.writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf-8');
+}
+
+/** Load a specific pet's chat history */
+export function loadPetHistory(petId: string): ChatMessage[] {
+  const dir = ensurePetsDir();
+  const historyPath = path.join(dir, `${petId}-history.json`);
+  if (!fs.existsSync(historyPath)) return [];
+  try {
+    const raw = fs.readFileSync(historyPath, 'utf-8');
+    return JSON.parse(raw) as ChatMessage[];
+  } catch {
+    return [];
+  }
+}
+
+/** Save a specific pet's chat history */
+export function savePetHistory(petId: string, messages: ChatMessage[]): void {
+  const dir = ensurePetsDir();
+  const historyPath = path.join(dir, `${petId}-history.json`);
+  fs.writeFileSync(historyPath, JSON.stringify(messages, null, 2), 'utf-8');
+}
+
+/** Delete a pet's state and history files */
+export function deletePetData(petId: string): void {
+  const dir = ensurePetsDir();
+  const statePath = path.join(dir, `${petId}.json`);
+  const historyPath = path.join(dir, `${petId}-history.json`);
+  if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
+  if (fs.existsSync(historyPath)) fs.unlinkSync(historyPath);
 }

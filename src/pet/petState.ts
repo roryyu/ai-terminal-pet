@@ -2,6 +2,19 @@
  * Pet state management - mood, hunger, experience, evolution stage.
  */
 
+/** Pet identifier for multi-pet registry */
+export interface PetId {
+  id: string;    // filesystem-safe unique ID
+  name: string;  // display name for tab rendering
+}
+
+/** Generate a unique, filesystem-safe pet ID from name */
+export function generatePetId(name: string): string {
+  const slug = name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]/g, '-').replace(/-+/g, '-').slice(0, 20);
+  const suffix = Math.random().toString(36).slice(2, 6);
+  return `${slug}-${suffix}`;
+}
+
 export interface PetState {
   name: string;
   stage: number;       // 1-5 evolution stage

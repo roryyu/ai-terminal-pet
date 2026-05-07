@@ -15,6 +15,8 @@ A terminal-based virtual pet with AI chat, pixel art evolution, and personality 
 - **Soul/Personality** — Define your pet's personality with `/soul` (e.g., 傲娇, lazy and greedy, 勇敢善良)
 - **Food & Play Reactions** — Feed specific foods (`/feed 鱼干`) or play activities (`/play 追球`) and your pet reacts in character
 - **Multi-LLM Support** — Works with Anthropic Claude, OpenAI, or any OpenAI-compatible API via `--base-url`
+- **Multi-Pet** — Raise multiple pets simultaneously! Switch between pets with Tab key or `/switchpet`
+- **LLM Response Cache** — Hybrid caching (exact match + template-based for feed/play) reduces token consumption. Pet evolution auto-invalidates stale cache
 - **Persistent State** — Pet state saved automatically, survives restarts
 
 ## Quick Start
@@ -41,11 +43,16 @@ npx tsx src/index.tsx --api-key YOUR_KEY --base-url https://your-api.example.com
 | `/play [activity]` | Play with your pet. Specifying activity triggers AI reaction (e.g., `/play 追球`) |
 | `/wish <animal>` | Make a wish during egg stage to decide what your pet hatches into |
 | `/soul <trait>` | Set your pet's personality (e.g., `/soul 傲娇`, `/soul brave and kind`) |
+| `/addpet <name>` | Add a new pet |
+| `/delpet` | Delete the active pet (with confirmation) |
+| `/switchpet <name>` | Switch to a pet by name |
+| `/cache` | Show LLM cache statistics |
 | `/status` | Show current pet stats |
 | `/help` | Show available commands |
 | `/quit` | Exit the application |
 
-Just type a message to chat with your pet — no command needed!
+Just type a message to chat with your pet — no command needed!  
+Press **Tab** (with empty input) to cycle between pets.
 
 ## CLI Options
 
@@ -103,7 +110,12 @@ YYYYYYYYYY
 Config and state are stored in `./ai-pet-data/`:
 
 - `config.json` — AI provider settings
-- `state.json` — Pet state (auto-saved)
+- `cache.json` — LLM response cache (auto-managed)
+- `pets/registry.json` — Pet registry (list of all pets + active pet)
+- `pets/{petId}.json` — Per-pet state (auto-saved)
+- `pets/{petId}-history.json` — Per-pet chat history
+
+> **Migration:** If upgrading from a single-pet version, the existing `state.json` is automatically migrated to the new `pets/` directory on first run.
 
 Example `config.json`:
 ```json
@@ -121,22 +133,28 @@ Example `config.json`:
 ```
 src/
 ├── index.tsx          # CLI entry point (commander)
-├── app.tsx            # Main app component, game loop
+├── app.tsx            # Main app component, game loop, multi-pet state
 ├── ai/
 │   ├── provider.ts    # AI provider interface
 │   ├── anthropic.ts   # Anthropic Claude adapter
 │   ├── openai.ts      # OpenAI adapter
 │   └── systemPrompt.ts # System prompt builder with pixel art protocol
+├── cache/
+│   ├── cacheTypes.ts  # Cache entry/data interfaces
+│   ├── cacheKey.ts    # Cache key builder (exact match + template)
+│   └── cacheManager.ts # Cache manager with TTL, LRU eviction
 ├── components/
 │   ├── PetSprite.tsx  # Animated pixel sprite renderer
 │   ├── StatusBar.tsx  # Mood/hunger/EXP progress bars
 │   ├── ChatPanel.tsx  # Chat history display
-│   ├── InputBar.tsx   # User input field
+│   ├── InputBar.tsx   # User input with Tab switching
+│   ├── PetTabs.tsx    # Multi-pet tab bar
 │   └── EvolutionAnimation.tsx # Evolution celebration
 ├── config/
-│   └── config.ts      # Config/state persistence (ai-pet-data/)
+│   ├── config.ts      # Config/state persistence (ai-pet-data/)
+│   └── registry.ts    # Pet registry types
 ├── pet/
-│   ├── petState.ts    # Pet state: mood, hunger, soul, wish, species
+│   ├── petState.ts    # Pet state: mood, hunger, soul, wish, species, PetId
 │   ├── evolution.ts   # Evolution stages & hatching logic
 │   └── sprites.ts     # Default pixel sprite data per stage
 └── utils/
