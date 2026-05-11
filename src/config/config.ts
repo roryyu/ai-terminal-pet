@@ -12,6 +12,8 @@ import { getStageForExp } from '../pet/evolution.js';
 import type { PetRegistry } from './registry.js';
 import { getDefaultRegistry } from './registry.js';
 import type { ChatMessage } from '../ai/provider.js';
+import type { PetInventory } from '../shop/inventory.js';
+import { createEmptyInventory } from '../shop/inventory.js';
 
 const DATA_DIR = 'ai-pet-data';
 const CONFIG_FILE = 'config.json';
@@ -25,6 +27,9 @@ export interface AppConfig {
   baseURL: string;  // custom API endpoint, empty = use default
   model: string;
   petName: string;
+  merchantAddress: string;  // crypto payment recipient address
+  defaultChain: string;     // e.g. "base", "ethereum", "bsc"
+  defaultToken: string;     // "USDT" or "USDC"
 }
 
 export function getDefaultConfig(): AppConfig {
@@ -34,6 +39,9 @@ export function getDefaultConfig(): AppConfig {
     baseURL: '',
     model: 'claude-sonnet-4-20250514',
     petName: 'Mochi',
+    merchantAddress: '',
+    defaultChain: 'base',
+    defaultToken: 'USDT',
   };
 }
 
@@ -177,6 +185,28 @@ export function deletePetData(petId: string): void {
   const dir = ensurePetsDir();
   const statePath = path.join(dir, `${petId}.json`);
   const historyPath = path.join(dir, `${petId}-history.json`);
+  const inventoryPath = path.join(dir, `${petId}-inventory.json`);
   if (fs.existsSync(statePath)) fs.unlinkSync(statePath);
   if (fs.existsSync(historyPath)) fs.unlinkSync(historyPath);
+  if (fs.existsSync(inventoryPath)) fs.unlinkSync(inventoryPath);
+}
+
+/** Load a specific pet's inventory */
+export function loadPetInventory(petId: string): PetInventory {
+  const dir = ensurePetsDir();
+  const inventoryPath = path.join(dir, `${petId}-inventory.json`);
+  if (!fs.existsSync(inventoryPath)) return createEmptyInventory();
+  try {
+    const raw = fs.readFileSync(inventoryPath, 'utf-8');
+    return JSON.parse(raw) as PetInventory;
+  } catch {
+    return createEmptyInventory();
+  }
+}
+
+/** Save a specific pet's inventory */
+export function savePetInventory(petId: string, inventory: PetInventory): void {
+  const dir = ensurePetsDir();
+  const inventoryPath = path.join(dir, `${petId}-inventory.json`);
+  fs.writeFileSync(inventoryPath, JSON.stringify(inventory, null, 2), 'utf-8');
 }

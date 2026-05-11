@@ -14,6 +14,7 @@ A terminal-based virtual pet with AI chat, pixel art evolution, and personality 
 - **Wish System** — Make a wish during the egg stage (`/wish dragon`) to decide what your pet becomes
 - **Soul/Personality** — Define your pet's personality with `/soul` (e.g., 傲娇, lazy and greedy, 勇敢善良)
 - **Food & Play Reactions** — Feed specific foods (`/feed 鱼干`) or play activities (`/play 追球`) and your pet reacts in character
+- **Crypto Pet Food Shop** — Buy premium food items with USDT/USDC via [OKX Agentic Wallet](https://github.com/okx/onchainos-skills). Rare and legendary foods give bigger stat boosts and bonus EXP
 - **Multi-LLM Support** — Works with Anthropic Claude, OpenAI, or any OpenAI-compatible API via `--base-url`
 - **Multi-Pet** — Raise multiple pets simultaneously! Switch between pets with Tab key or `/switchpet`
 - **LLM Response Cache** — Hybrid caching (exact match + template-based for feed/play) reduces token consumption. Pet evolution auto-invalidates stale cache
@@ -39,10 +40,15 @@ npx tsx src/index.tsx --api-key YOUR_KEY --base-url https://your-api.example.com
 
 | Command | Description |
 |---|---|
-| `/feed [food]` | Feed your pet. Specifying food triggers AI reaction (e.g., `/feed 鱼干`) |
+| `/feed [food]` | Feed your pet. Specifying food triggers AI reaction (e.g., `/feed 鱼干`). Also consumes shop items from inventory |
 | `/play [activity]` | Play with your pet. Specifying activity triggers AI reaction (e.g., `/play 追球`) |
 | `/wish <animal>` | Make a wish during egg stage to decide what your pet hatches into |
 | `/soul <trait>` | Set your pet's personality (e.g., `/soul 傲娇`, `/soul brave and kind`) |
+| `/shop` | Browse the pet food shop catalog |
+| `/buy <item>` | Purchase a food item with crypto (e.g., `/buy golden-apple`) |
+| `/confirm` | Confirm a pending crypto payment |
+| `/inventory` | View your pet's food inventory |
+| `/wallet` | Show wallet status and configuration |
 | `/addpet <name>` | Add a new pet |
 | `/delpet` | Delete the active pet (with confirmation) |
 | `/switchpet <name>` | Switch to a pet by name |
@@ -85,6 +91,81 @@ Options:
 - Negative words have less effect (−2 vs −5)
 - Hunger doesn't increase while still an egg
 
+## Crypto Pet Food Shop
+
+Buy premium food items for your pet using real crypto (USDT/USDC) via the [onchainos CLI](https://github.com/okx/onchainos-skills).
+
+### Food Catalog
+
+| Tier | Item | Price | Hunger | Mood | EXP |
+|------|------|-------|--------|------|-----|
+| COMMON | 🍎 Apple | $0.10 | -30 | +5 | +5 |
+| COMMON | 🐟 Fresh Fish | $0.25 | -40 | +15 | +10 |
+| COMMON | 🥩 Juicy Steak | $0.30 | -45 | +12 | +10 |
+| RARE | ✨ Golden Apple | $0.50 | -50 | +25 | +25 |
+| RARE | 🎂 Magic Cake | $0.75 | -40 | +35 | +30 |
+| LEGENDARY | 🐉 Dragon Fruit | $1.00 | -60 | +50 | +50 |
+| LEGENDARY | ⭐ Star Cookie | $2.00 | -50 | +60 | +75 |
+
+### Setup
+
+1. **Install onchainos CLI** — follow [okx/onchainos-skills](https://github.com/okx/onchainos-skills) installation guide
+2. **Login** — run `onchainos wallet login` and complete email OTP verification
+3. **Configure merchant address** — set your receiving wallet address in `ai-pet-data/config.json`:
+
+```json
+{
+  "merchantAddress": "0xYourWalletAddress",
+  "defaultChain": "base",
+  "defaultToken": "USDT"
+}
+```
+
+### Usage
+
+```bash
+# Browse the shop
+/shop
+
+# Buy a food item (pay with USDT)
+/buy golden-apple
+
+# Confirm a pending payment (when prompted)
+/confirm
+
+# Check your inventory
+/inventory
+
+# Feed your pet with a shop item (consumes from inventory)
+/feed golden-apple
+
+# Check wallet status
+/wallet
+```
+
+### Supported Chains
+
+| Chain | USDT | USDC |
+|-------|------|------|
+| Base | ✅ | ✅ |
+| Ethereum | ✅ | ✅ |
+| BSC | ✅ | ✅ |
+| Arbitrum | ✅ | ✅ |
+| Polygon | ✅ | ✅ |
+
+Default chain is **Base** (low gas fees). Change via `defaultChain` in config.
+
+### Payment Flow
+
+```
+/buy golden-apple
+  → Checks wallet login status
+  → Sends $0.50 USDT to merchant address
+  → Exit code 0: Payment success, item added to inventory
+  → Exit code 2: Confirmation required, type /confirm to proceed
+  → Exit code 1: Payment failed, error displayed
+```
+
 ## Pixel Art Protocol
 
 The AI model can draw and animate your pet's appearance using a text-based pixel art format:
@@ -114,6 +195,7 @@ Config and state are stored in `./ai-pet-data/`:
 - `pets/registry.json` — Pet registry (list of all pets + active pet)
 - `pets/{petId}.json` — Per-pet state (auto-saved)
 - `pets/{petId}-history.json` — Per-pet chat history
+- `pets/{petId}-inventory.json` — Per-pet food inventory
 
 > **Migration:** If upgrading from a single-pet version, the existing `state.json` is automatically migrated to the new `pets/` directory on first run.
 
@@ -124,7 +206,10 @@ Example `config.json`:
   "apiKey": "sk-ant-...",
   "baseURL": "",
   "model": "claude-sonnet-4-20250514",
-  "petName": "布朗"
+  "petName": "布朗",
+  "merchantAddress": "0xYourWalletAddress",
+  "defaultChain": "base",
+  "defaultToken": "USDT"
 }
 ```
 
@@ -157,6 +242,10 @@ src/
 │   ├── petState.ts    # Pet state: mood, hunger, soul, wish, species, PetId
 │   ├── evolution.ts   # Evolution stages & hatching logic
 │   └── sprites.ts     # Default pixel sprite data per stage
+├── shop/
+│   ├── items.ts       # Food item catalog (7 items, 3 tiers)
+│   ├── inventory.ts   # Per-pet inventory management
+│   └── wallet.ts      # onchainos CLI wrapper for crypto payments
 └── utils/
     └── pixel.tsx      # Pixel rendering, AI sprite parser, color map
 ```

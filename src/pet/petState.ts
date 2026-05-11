@@ -77,6 +77,23 @@ export function feedPet(state: PetState, food?: string): PetState {
   };
 }
 
+/** Feed the pet with a shop item: applies item-specific stat effects */
+export interface ShopItemForFeed {
+  hungerReduce: number;
+  moodBoost: number;
+  expBonus: number;
+}
+
+export function feedWithItem(state: PetState, item: ShopItemForFeed): PetState {
+  return {
+    ...state,
+    hunger: clamp(state.hunger - item.hungerReduce, 0, 100),
+    mood: clamp(state.mood + item.moodBoost, 0, 100),
+    experience: state.experience + item.expBonus,
+    lastFedAt: new Date().toISOString(),
+  };
+}
+
 /** Play with the pet: increases mood, slightly increases hunger */
 export function playWithPet(state: PetState, activity?: string): PetState {
   // Exciting activities give bigger mood boost

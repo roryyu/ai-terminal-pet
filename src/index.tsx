@@ -8,13 +8,14 @@
 import fs from 'fs';
 import path from 'path';
 import { Command } from 'commander';
-import { loadConfig, saveConfig, loadState, isConfigured, loadRegistry, saveRegistry, loadPetState, savePetState, loadPetHistory, ensurePetsDir, type AppConfig } from './config/config.js';
+import { loadConfig, saveConfig, loadState, isConfigured, loadRegistry, saveRegistry, loadPetState, savePetState, loadPetHistory, loadPetInventory, ensurePetsDir, type AppConfig } from './config/config.js';
 import { AnthropicProvider } from './ai/anthropic.js';
 import { OpenAIProvider } from './ai/openai.js';
 import type { AIProvider, ChatMessage } from './ai/provider.js';
 import { startApp } from './app.js';
 import { createInitialState, generatePetId, type PetId } from './pet/petState.js';
 import type { PetState } from './pet/petState.js';
+import type { PetInventory } from './shop/inventory.js';
 import type { PetRegistry } from './config/registry.js';
 import { getDefaultRegistry } from './config/registry.js';
 
@@ -82,6 +83,7 @@ async function main(opts: Record<string, string | undefined>) {
   let registry = loadRegistry();
   const initialPets: Record<string, PetState> = {};
   const initialHistories: Record<string, ChatMessage[]> = {};
+  const initialInventories: Record<string, PetInventory> = {};
 
   if (registry.pets.length === 0) {
     // Check for legacy single-pet state.json to migrate
@@ -94,6 +96,7 @@ async function main(opts: Record<string, string | undefined>) {
       const petId = generatePetId(legacyState.name);
       initialPets[petId] = legacyState;
       initialHistories[petId] = [];
+      initialInventories[petId] = loadPetInventory(petId);
       const petEntry: PetId = { id: petId, name: legacyState.name };
       registry = { pets: [petEntry], activePetId: petId, version: 1 };
       ensurePetsDir();
@@ -106,6 +109,7 @@ async function main(opts: Record<string, string | undefined>) {
       const state = createInitialState(config.petName);
       initialPets[petId] = state;
       initialHistories[petId] = [];
+      initialInventories[petId] = loadPetInventory(petId);
       const petEntry: PetId = { id: petId, name: config.petName };
       registry = { pets: [petEntry], activePetId: petId, version: 1 };
       ensurePetsDir();
@@ -120,6 +124,7 @@ async function main(opts: Record<string, string | undefined>) {
       if (state) {
         initialPets[petIdObj.id] = state;
         initialHistories[petIdObj.id] = loadPetHistory(petIdObj.id);
+        initialInventories[petIdObj.id] = loadPetInventory(petIdObj.id);
         validPetIds.push(petIdObj.id);
       }
     }
@@ -143,6 +148,7 @@ async function main(opts: Record<string, string | undefined>) {
     const state = createInitialState(config.petName);
     initialPets[petId] = state;
     initialHistories[petId] = [];
+    initialInventories[petId] = loadPetInventory(petId);
     const petEntry: PetId = { id: petId, name: config.petName };
     registry = { pets: [petEntry], activePetId: petId, version: 1 };
     ensurePetsDir();
@@ -154,7 +160,7 @@ async function main(opts: Record<string, string | undefined>) {
   const provider = createProvider(config);
 
   // Start the app
-  await startApp(initialPets, initialHistories, registry.activePetId, registry, provider);
+  await startApp(initialPets, initialHistories, initialInventories, registry.activePetId, registry, provider);
 }
 
 program.parse();

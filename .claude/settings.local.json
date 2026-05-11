@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(npm list *)",
+      "Bash(~/.local/bin/plugin-store --version)",
+      "Bash(curl -sSL https://raw.githubusercontent.com/okx/plugin-store/main/skills/plugin-store/install.sh)",
+      "Bash(sh)"
+    ]
+  }
+}
